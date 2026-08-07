@@ -209,6 +209,10 @@ alias = {"python_dotenv": "dotenv", "faiss_cpu": "faiss", "gpt_oss": "gpt_oss"}
 sys.exit(0 if u.find_spec(alias.get(name, name)) else 1)
 PY
 done
+# hf_xet is a Rust transfer backend that segfaults on some network
+# filesystems. Remove it so nothing can load it, env var or not.
+python -m pip uninstall -y -q hf_xet hf_transfer 2>/dev/null || true
+
 # tevatron is imported by the scaffold's backend.py; install the vendored copy
 python -c "import tevatron" 2>/dev/null || pip install -q --no-deps -e "$ROOT/scaffold/tevatron_src"
 
@@ -273,14 +277,9 @@ PYEOF
 # Try the CLI; if it dies for ANY reason (including a segfault, which shows up
 # as exit 139), fall back to the python API.
 hf_get() {  # hf_get <repo> <local_dir> [allow_pattern]
-  local repo="$1" dir="$2" pat="${3:-}"
-  if [ -n "$pat" ]; then
-    hf download "$repo" --repo-type dataset --include "$pat" --local-dir "$dir" && return 0
-  else
-    hf download "$repo" --repo-type dataset --local-dir "$dir" && return 0
-  fi
-  echo "   CLI download failed (exit $?), retrying via python API..."
-  py_download "$repo" "$dir" "$pat"
+  # Python API ONLY. The `hf` CLI segfaults on network filesystems (hf_xet
+  # Rust backend); a crashing binary in the path just costs a round trip.
+  py_download "$1" "$2" "${3:-}"
 }
 
 # Skip only when the expected FILES exist -- an empty directory left behind by a
@@ -339,20 +338,15 @@ mkdir -p "$ROOT/models"
 dl() {
   local repo="$1" dir="$2"
   if [ -f "$ROOT/models/$dir/.complete" ]; then echo "     [skip] $dir"; return; fi
-  echo "     downloading $repo (~16 GB; progress below)"
-  if hf download "$repo" --local-dir "$ROOT/models/$dir"; then
-    touch "$ROOT/models/$dir/.complete"
-  else
-    echo "     CLI failed (exit $?), retrying via python API..."
-    python - "$repo" "$ROOT/models/$dir" <<'PYEOF' && touch "$ROOT/models/$dir/.complete"
+  echo "     downloading $repo (~16 GB, python API; progress below)"
+  python - "$repo" "$ROOT/models/$dir" <<'PYEOF' && touch "$ROOT/models/$dir/.complete"
 import os, sys
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 from huggingface_hub import snapshot_download
 snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2], max_workers=4)
-print("   downloaded", sys.argv[1])
+print("     downloaded", sys.argv[1])
 PYEOF
-  fi
 }
 dl rl-research/DR-Tulu-8B      DR-Tulu-8B
 dl rl-research/DR-Tulu-SFT-8B  DR-Tulu-SFT-8B
