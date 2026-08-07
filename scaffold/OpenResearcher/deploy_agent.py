@@ -110,6 +110,19 @@ _ATTR_RE = re.compile(r"""(\w+)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))""")
 #   find   -> the body is the PATTERN
 #   open   -> the body (when present) is a corpus URL, i.e. the `id`
 _BODY_ARG = {"search": "query", "find": "pattern", "open": "id"}
+_TOOL_ALIASES = {
+    "google_search": "search",
+    "web_search": "search",
+    "snippet_search": "search",
+    "browser.search": "search",
+    "browse_webpage": "open",
+    "open_url": "open",
+    "browser.open": "open",
+    "visit": "open",
+    "find_in_page": "find",
+    "browser.find": "find",
+}
+
 # Args the scaffold's browser tools accept, and which are numeric.
 _INT_ARGS = {"topn", "cursor", "loc", "num_lines"}
 _VALID_ARGS = {
@@ -146,6 +159,7 @@ def parse_call_tool_xml(text: str):
         attrs[key] = val
 
     name = (attrs.pop("name", "") or "").strip().lower()
+    name = _TOOL_ALIASES.get(name, name)
     if name not in _VALID_ARGS:
         return None
 
@@ -251,9 +265,10 @@ def salvage_tool_call(text: str):
         if mm:
             args[key] = int(mm.group(1))
 
-    short = name.split(".")[-1].lower()
+    short = _TOOL_ALIASES.get(name.lower(), name.split(".")[-1].lower())
     if short not in ("search", "open", "find"):
         return None
+    name = short
     if short == "search" and not args.get("query"):
         return _last_resort(text, name, short)
     if short == "find" and not args.get("pattern"):

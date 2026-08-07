@@ -94,6 +94,15 @@ for raw, want, txt in cases:
 sys.exit(0)
 PY
 
+echo "[5a] DR-Tulu tool-name aliases present in the scaffold"
+if grep -q "_TOOL_ALIASES" scaffold/OpenResearcher/deploy_agent.py; then
+  ok "_TOOL_ALIASES table present"
+else
+  bad "_TOOL_ALIASES MISSING -- google_search will be dropped and every run will
+       report zero tool calls. This was clobbered once by copying deploy_agent.py
+       from the UMass tree, which does not carry the DR-Tulu-specific aliases."
+fi
+
 echo "[5b] rendered prompt must NOT contain a conflicting tool format"
 python - <<'PY2' && ok "rendered prompt teaches call_tool only" || bad "chat template injects <tool_call> -- model will ignore the mentor prompt"
 import os, sys, json
