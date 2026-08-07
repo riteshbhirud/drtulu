@@ -69,6 +69,11 @@ echo "   free disk: ${FREE_GB:-?} GB (need ~120 for 3 checkpoints + index)"
 
 # ---------------------------------------------------------------- venv
 echo "[2/6] python environment"
+# A PIP_USER=1 in the environment makes get-pip.py (and every later pip call)
+# fail with "Can not perform a '--user' install" inside a venv. Clear the whole
+# family up front -- this cost us a failed setup once already.
+unset PIP_USER PIP_TARGET PIP_PREFIX PYTHONHOME 2>/dev/null || true
+export PIP_USER=0
 # Many clusters ship python3 without ensurepip (Debian splits it into
 # python3-venv), so `python3 -m venv` fails and you cannot apt-install without
 # root. Try four paths in order and use whichever works.
@@ -82,10 +87,22 @@ if [ ! -x "$ROOT/env/bin/python" ]; then
   if [ $MADE -eq 0 ]; then
     rm -rf "$ROOT/env"
     if python3 -m venv --without-pip "$ROOT/env" 2>/dev/null && [ -x "$ROOT/env/bin/python" ]; then
-      echo "   created with: python3 -m venv --without-pip (bootstrapping pip)"
-      curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-        || wget -qO /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py
-      "$ROOT/env/bin/python" /tmp/get-pip.py -q && MADE=1
+      echo "   created with: python3 -m venv --without-pip"
+      echo "   bootstrapping pip via get-pip.py ..."
+      if curl -sSL https://bootstrap.pypa.io/get-pip.py -o "$ROOT/get-pip.py" 2>/dev/null \
+         || wget -qO "$ROOT/get-pip.py" https://bootstrap.pypa.io/get-pip.py 2>/dev/null; then
+        # NOT -q: if this fails we need to see why, and a silent failure here
+        # used to fall through and delete the env we had just built.
+        if "$ROOT/env/bin/python" "$ROOT/get-pip.py" 2>&1 | tail -3; then :; fi
+        if "$ROOT/env/bin/python" -m pip --version >/dev/null 2>&1; then
+          echo "   pip bootstrapped: $("$ROOT/env/bin/python" -m pip --version)"
+          MADE=1
+        else
+          echo "   get-pip.py ran but pip is still unusable"
+        fi
+      else
+        echo "   could not download get-pip.py (no internet?)"
+      fi
     fi
   fi
   # (c) the virtualenv package (bundles its own pip, no ensurepip needed)
@@ -112,7 +129,14 @@ if [ ! -x "$ROOT/env/bin/python" ]; then
 fi
 # shellcheck disable=SC1091
 source "$ROOT/env/bin/activate"
+unset PIP_USER PIP_TARGET PIP_PREFIX 2>/dev/null || true
 export PIP_USER=0
+python -m pip --version >/dev/null 2>&1 || {
+  echo "FATAL: pip is not usable inside $ROOT/env"
+  echo "   If your shell exports PIP_USER=1, unset it and re-run:  unset PIP_USER"
+  exit 1
+}
+echo "   using: $(python -V 2>&1), $(python -m pip --version | cut -d" " -f1-2)"
 python -m pip install -q --upgrade pip setuptools wheel
 
 # ---------------------------------------------------------------- deps
