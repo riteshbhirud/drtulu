@@ -1,0 +1,143 @@
+#!/bin/bash
+# DR-Tulu bundle — STEP 3: run BrowseComp-Plus.
+#
+#   bash 3_run.sh rl   --limit 5   # smoke test FIRST (~15 min)
+#   bash 3_run.sh rl               # full 830 questions
+#   bash 3_run.sh sft
+#   bash 3_run.sh base
+#
+# RESUMABLE: re-running continues where it stopped. Nothing is lost or repeated.
+# Kill it any time (Ctrl-C, node reboot, preemption) and re-run the same command.
+#
+# GPUs: set CUDA_VISIBLE_DEVICES to the free ones, e.g.
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 bash 3_run.sh rl
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+CKPT="${1:-rl}"; shift || true
+case "$CKPT" in
+  rl)   MODEL="models/DR-Tulu-8B" ;;
+  sft)  MODEL="models/DR-Tulu-SFT-8B" ;;
+  base) MODEL="models/Qwen3-8B" ;;
+  *) echo "usage: bash 3_run.sh {rl|sft|base} [--limit N]"; exit 1 ;;
+esac
+
+RUN_NAME="drtulu_${CKPT}_bm25_top5"
+OUT="$ROOT/results/$RUN_NAME"
+mkdir -p "$OUT" "$ROOT/logs" "$ROOT/checkpoints"
+
+source "$ROOT/env/bin/activate"
+[ -f "$ROOT/env.sh" ] && source "$ROOT/env.sh"
+export JAVA_HOME="${JAVA_HOME:-}"
+
+# ---- CONFIG (verified against the mentor's spec; do not change casually) ----
+export RUN_CTX="40960"          # DR-Tulu's published eval context
+export MAX_ROUNDS="${MAX_ROUNDS:-60}"   # mentor's turn cap (TRACE paper)
+export RUN_TOPK="5"             # BM25 top-5, official BCP protocol
+export GEN_TEMPERATURE="1.0"    # DR-Tulu eval config (auto_search_sft.yaml)
+export MODEL_CONTEXT_WINDOW="$RUN_CTX"
+export SYSTEM_PROMPT_FILE="$ROOT/prompts/drtulu_prompt.txt"
+export CHECKPOINT_FILE="$ROOT/checkpoints/${RUN_NAME}.json"
+export TOKENIZER_PATH="$ROOT/$MODEL"
+export RUN_SYSTEM="DR-Tulu-8B"
+export RUN_CHECKPOINT="$CKPT"
+export RUN_RETRIEVER="bm25"
+export RUN_TOOL_FORMAT="call_tool_xml"
+export RUN_THINKING="true"
+export VLLM_USE_FLASHINFER_SAMPLER=0    # FlashInfer JIT fails on some clusters
+export HF_HUB_OFFLINE=1                 # weights are local; never hit the network
+export TMPDIR="${TMPDIR:-/tmp}"
+
+NGPU=$(python -c "import torch;print(torch.cuda.device_count())" 2>/dev/null || echo 1)
+# vLLM tensor-parallel must divide the model's 8 KV heads: 1,2,4,8 only.
+case "$NGPU" in 8) TP=8;; 4|5|6|7) TP=4;; 2|3) TP=2;; *) TP=1;; esac
+CONC=$(( TP * 16 ))
+SEARCH_PORT=$(( 18000 + RANDOM % 900 ))
+VLLM_PORT=$(( 19000 + RANDOM % 900 ))
+
+DONE_N=$(cat "$OUT"/node_*_shard_*.jsonl 2>/dev/null | wc -l)
+echo "=========================================================="
+echo "DR-Tulu $CKPT  |  $MODEL"
+echo "  ctx=$RUN_CTX  turns=$MAX_ROUNDS  top_k=$RUN_TOPK  temp=$GEN_TEMPERATURE"
+echo "  GPUs visible=$NGPU -> TP=$TP, concurrency=$CONC"
+echo "  already done: $DONE_N/830   (resuming)"
+echo "  ports: search=$SEARCH_PORT vllm=$VLLM_PORT"
+echo "=========================================================="
+
+cleanup() {
+  echo; echo "[cleanup] stopping services"
+  # ORDER MATTERS: agent first. Killing vLLM under a live agent makes every
+  # in-flight question fail its retries and be written as an error record --
+  # which resume then treats as "done" and skips forever.
+  [ -n "${AGENT_PID:-}" ] && { kill "$AGENT_PID" 2>/dev/null; wait "$AGENT_PID" 2>/dev/null; }
+  [ -n "${VLLM_PID:-}"  ] && kill "$VLLM_PID" 2>/dev/null
+  [ -n "${SEARCH_PID:-}" ] && kill "$SEARCH_PID" 2>/dev/null
+  sleep 4
+  pkill -9 -f "vllm.entrypoints.openai.api_server" 2>/dev/null
+  pkill -9 -f "VLLM::EngineCore" 2>/dev/null   # holds GPU memory after the API server exits
+}
+trap cleanup EXIT TERM INT
+
+# ---------------------------------------------------------------- BM25 service
+cd "$ROOT/scaffold/OpenResearcher"
+LUCENE_EXTRA_DIR="$PWD/lucene_jars" \
+LUCENE_INDEX_DIR="$ROOT/data/browsecomp-plus-indexes/bm25" \
+CORPUS_PARQUET_PATH="$ROOT/data/browsecomp-plus-corpus/data/*.parquet" \
+SEARCHER_TYPE=bm25 MAX_SNIPPET_LEN=2048 \
+  python -m uvicorn scripts.deploy_search_service:app \
+    --host 127.0.0.1 --port "$SEARCH_PORT" > "$ROOT/logs/${RUN_NAME}_search.log" 2>&1 &
+SEARCH_PID=$!
+cd "$ROOT"
+
+# ---------------------------------------------------------------- vLLM
+python -u -m vllm.entrypoints.openai.api_server \
+  --model "$MODEL" --served-model-name "$MODEL" \
+  --host 127.0.0.1 --port "$VLLM_PORT" \
+  --max-model-len "$RUN_CTX" \
+  --gpu-memory-utilization "${GPU_UTIL:-0.85}" \
+  --tensor-parallel-size "$TP" \
+  --max-num-seqs "$CONC" \
+  --trust-remote-code --enable-prefix-caching \
+  > "$ROOT/logs/${RUN_NAME}_vllm.log" 2>&1 &
+VLLM_PID=$!
+
+echo "[wait] services starting (vLLM load + CUDA graphs can take 3-8 min)..."
+for i in $(seq 1 150); do
+  s=0; v=0
+  curl -s -m 2 "http://127.0.0.1:$SEARCH_PORT/" >/dev/null 2>&1 && s=1
+  curl -s -m 2 "http://127.0.0.1:$VLLM_PORT/v1/models" >/dev/null 2>&1 && v=1
+  [ $s -eq 1 ] && [ $v -eq 1 ] && { echo "[wait] both up (~$((i*10))s)"; break; }
+  kill -0 "$VLLM_PID" 2>/dev/null || { echo "FATAL: vllm died"; tail -40 "$ROOT/logs/${RUN_NAME}_vllm.log"; exit 1; }
+  kill -0 "$SEARCH_PID" 2>/dev/null || { echo "FATAL: search died"; tail -40 "$ROOT/logs/${RUN_NAME}_search.log"; exit 1; }
+  sleep 10
+done
+curl -s -m 3 "http://127.0.0.1:$VLLM_PORT/v1/models" >/dev/null 2>&1 \
+  || { echo "FATAL: vllm never became ready"; tail -40 "$ROOT/logs/${RUN_NAME}_vllm.log"; exit 1; }
+grep -oE "Maximum concurrency for [0-9,]+ tokens per request: [0-9.]+x" \
+  "$ROOT/logs/${RUN_NAME}_vllm.log" | tail -1 | sed 's/^/[kv] /'
+
+# ---------------------------------------------------------------- agent
+cd "$ROOT/scaffold/OpenResearcher"
+python -u deploy_agent.py \
+  --output_dir "$OUT" \
+  --model_name_or_path "$MODEL" \
+  --search_url "http://127.0.0.1:$SEARCH_PORT" \
+  --dataset_name browsecomp_plus \
+  --data_path "$ROOT/data/browsecomp-plus/data/*.parquet" \
+  --browser_backend local \
+  --vllm_server_url "http://127.0.0.1:$VLLM_PORT/v1" \
+  --max_concurrency_per_worker "$CONC" \
+  "$@" 2>&1 | tee -a "$ROOT/logs/${RUN_NAME}_agent.log" &
+AGENT_PID=$!
+wait $AGENT_PID
+cd "$ROOT"
+
+N=$(cat "$OUT"/node_*_shard_*.jsonl 2>/dev/null | wc -l)
+F=$(grep -ho '"status": "fail"' "$OUT"/node_*_shard_*.jsonl 2>/dev/null | wc -l)
+echo
+echo "=========================================================="
+echo "finished: $N/830 done, $F failed"
+echo "  re-run the same command to continue if < 830"
+echo "  then check quality:  bash 4_check.sh $CKPT"
+echo "=========================================================="

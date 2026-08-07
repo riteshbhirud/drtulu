@@ -1,0 +1,26 @@
+# Generated on the target machine by 1_setup.sh -- never commit these.
+env/
+jdk21/
+env.sh
+models/
+data/
+
+# Run outputs. Trajectories are the deliverable but are large and machine-local;
+# copy them back manually rather than through git.
+results/
+checkpoints/
+logs/
+*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
