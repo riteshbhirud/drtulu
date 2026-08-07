@@ -46,6 +46,25 @@ export RUN_RETRIEVER="bm25"
 export RUN_TOOL_FORMAT="call_tool_xml"
 export RUN_THINKING="true"
 export VLLM_USE_FLASHINFER_SAMPLER=0    # FlashInfer JIT fails on some clusters
+# vLLM's torch.compile path needs nvcc + libnvrtc. Clusters often ship only the
+# driver, but the CUDA toolkit is bundled inside the venv's nvidia/ packages --
+# point CUDA_HOME at it. Cost us two failed starts on the UMass box.
+for _cu in "$ROOT/env/lib/python3.12/site-packages/nvidia/cu13" \
+           "$ROOT/env/lib/python3.12/site-packages/nvidia/cu12"; do
+  if [ -x "$_cu/bin/nvcc" ]; then
+    export CUDA_HOME="$_cu"
+    export PATH="$_cu/bin:$PATH"
+    export LD_LIBRARY_PATH="$_cu/lib:${LD_LIBRARY_PATH:-}"
+    echo "[cuda] CUDA_HOME=$_cu"
+    break
+  fi
+done
+if [ -z "${CUDA_HOME:-}" ] && ! command -v nvcc >/dev/null 2>&1; then
+  # No toolkit anywhere: disable the compile path so vLLM falls back to eager.
+  export VLLM_USE_V1=1
+  export TORCHINDUCTOR_DISABLE=1
+  echo "[cuda] no nvcc found -- disabling inductor compile path"
+fi
 export HF_HUB_OFFLINE=1                 # weights are local; never hit the network
 export TMPDIR="${TMPDIR:-/tmp}"
 
@@ -134,7 +153,17 @@ for i in $(seq 1 150); do
   curl -s -m 2 "http://127.0.0.1:$SEARCH_PORT/" >/dev/null 2>&1 && s=1
   curl -s -m 2 "http://127.0.0.1:$VLLM_PORT/v1/models" >/dev/null 2>&1 && v=1
   [ $s -eq 1 ] && [ $v -eq 1 ] && { echo "[wait] both up (~$((i*10))s)"; break; }
-  kill -0 "$VLLM_PID" 2>/dev/null || { echo "FATAL: vllm died"; tail -40 "$ROOT/logs/${RUN_NAME}_vllm.log"; exit 1; }
+  kill -0 "$VLLM_PID" 2>/dev/null || {
+    echo "FATAL: vllm died. ROOT CAUSE (first real error in the log):"
+    # The outer traceback always ends in "Engine core initialization failed.
+    # See root cause above." -- so surface what is actually above it.
+    grep -nE "Error|ERROR|Exception|RuntimeError|ValueError|No module|not found|CUDA|out of memory|OOM|nvcc|ninja|Failed" \
+      "$ROOT/logs/${RUN_NAME}_vllm.log" 2>/dev/null \
+      | grep -viE "^.*INFO|resource_tracker|See root cause" | head -15 | sed 's/^/    /'
+    echo "  --- last 15 lines ---"
+    tail -15 "$ROOT/logs/${RUN_NAME}_vllm.log" | sed 's/^/    /'
+    echo "  full log: $ROOT/logs/${RUN_NAME}_vllm.log"
+    exit 1; }
   kill -0 "$SEARCH_PID" 2>/dev/null || { echo "FATAL: search died"; tail -40 "$ROOT/logs/${RUN_NAME}_search.log"; exit 1; }
   sleep 10
 done
