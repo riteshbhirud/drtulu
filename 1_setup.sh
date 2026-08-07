@@ -231,14 +231,49 @@ cd "$ROOT"
 echo "[5/6] BrowseComp-Plus data (queries, corpus, BM25 index)"
 mkdir -p "$ROOT/data"
 python -m pip install -q huggingface_hub
-hf() { python -m huggingface_hub.commands.huggingface_cli "$@" 2>/dev/null || huggingface-cli "$@"; }
-[ -d "$ROOT/data/browsecomp-plus/data" ] || \
-  hf download Tevatron/browsecomp-plus --repo-type dataset --local-dir "$ROOT/data/browsecomp-plus"
-[ -d "$ROOT/data/browsecomp-plus-corpus/data" ] || \
-  hf download Tevatron/browsecomp-plus-corpus --repo-type dataset --local-dir "$ROOT/data/browsecomp-plus-corpus"
-[ -d "$ROOT/data/browsecomp-plus-indexes/bm25" ] || \
+# Do NOT swallow stderr here: a failed download used to look like success.
+hf() { python -m huggingface_hub.commands.huggingface_cli "$@" || huggingface-cli "$@"; }
+
+# Skip only when the expected FILES exist -- an empty directory left behind by a
+# failed download previously caused this step to be skipped forever, and the run
+# then died at service startup with "No files found that match the pattern".
+need_dl() {  # need_dl <glob> ; true when the glob matches nothing
+  ! compgen -G "$1" > /dev/null 2>&1
+}
+
+if need_dl "$ROOT/data/browsecomp-plus/data/*.parquet"; then
+  echo "   downloading queries..."
+  hf download Tevatron/browsecomp-plus --repo-type dataset --local-dir "$ROOT/data/browsecomp-plus" || true
+fi
+if need_dl "$ROOT/data/browsecomp-plus-corpus/data/*.parquet"; then
+  echo "   downloading corpus (~1.7 GB)..."
+  hf download Tevatron/browsecomp-plus-corpus --repo-type dataset --local-dir "$ROOT/data/browsecomp-plus-corpus" || true
+fi
+if need_dl "$ROOT/data/browsecomp-plus-indexes/bm25/*"; then
+  echo "   downloading BM25 index (~2.1 GB)..."
   hf download Tevatron/browsecomp-plus-indexes --repo-type dataset --include "bm25/*" \
-      --local-dir "$ROOT/data/browsecomp-plus-indexes"
+      --local-dir "$ROOT/data/browsecomp-plus-indexes" || true
+fi
+
+# Hard gate: the run cannot work without these, so fail here rather than at
+# service startup 10 minutes later.
+DATA_OK=1
+for g in "$ROOT/data/browsecomp-plus/data/*.parquet" \
+         "$ROOT/data/browsecomp-plus-corpus/data/*.parquet" \
+         "$ROOT/data/browsecomp-plus-indexes/bm25/*"; do
+  if compgen -G "$g" > /dev/null 2>&1; then
+    n=$(compgen -G "$g" | wc -l)
+    echo "     OK   $n file(s): $(dirname "$g")"
+  else
+    echo "     MISSING: $g"
+    DATA_OK=0
+  fi
+done
+if [ "$DATA_OK" -eq 0 ]; then
+  echo "FATAL: dataset download incomplete. Re-run 1_setup.sh (it resumes),"
+  echo "       or check network/HF access. Do not run 3_run.sh until this passes."
+  exit 1
+fi
 du -sh "$ROOT"/data/* 2>/dev/null | sed 's/^/     /'
 
 # ---------------------------------------------------------------- models
@@ -253,6 +288,16 @@ dl() {
 dl rl-research/DR-Tulu-8B      DR-Tulu-8B
 dl rl-research/DR-Tulu-SFT-8B  DR-Tulu-SFT-8B
 dl Qwen/Qwen3-8B               Qwen3-8B
+
+MODELS_OK=1
+for m in DR-Tulu-8B DR-Tulu-SFT-8B Qwen3-8B; do
+  if [ -f "$ROOT/models/$m/config.json" ] && compgen -G "$ROOT/models/$m/*.safetensors" >/dev/null 2>&1; then
+    echo "     OK   models/$m"
+  else
+    echo "     INCOMPLETE: models/$m"; MODELS_OK=0
+  fi
+done
+[ "$MODELS_OK" -eq 1 ] || { echo "FATAL: model download incomplete. Re-run 1_setup.sh (it resumes)."; exit 1; }
 du -sh "$ROOT"/models/* 2>/dev/null | sed 's/^/     /'
 
 echo

@@ -68,6 +68,20 @@ CONC=$(( TP * 16 ))
 SEARCH_PORT=$(( 18000 + RANDOM % 900 ))
 VLLM_PORT=$(( 19000 + RANDOM % 900 ))
 
+# Fail fast with an actionable message rather than a 60-line duckdb/uvicorn
+# traceback 30 seconds into service startup.
+for g in "$ROOT/data/browsecomp-plus/data/*.parquet" \
+         "$ROOT/data/browsecomp-plus-corpus/data/*.parquet" \
+         "$ROOT/data/browsecomp-plus-indexes/bm25/*" \
+         "$ROOT/$MODEL/config.json"; do
+  compgen -G "$g" > /dev/null 2>&1 || {
+    echo "FATAL: missing required files: $g"
+    echo "   Setup did not finish. Run:  bash 1_setup.sh  (it resumes)"
+    echo "   Then:                       bash 2_verify.sh"
+    exit 1
+  }
+done
+
 DONE_N=$(cat "$OUT"/node_*_shard_*.jsonl 2>/dev/null | wc -l)
 echo "=========================================================="
 echo "DR-Tulu $CKPT  |  $MODEL"
