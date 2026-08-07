@@ -49,7 +49,19 @@ export VLLM_USE_FLASHINFER_SAMPLER=0    # FlashInfer JIT fails on some clusters
 export HF_HUB_OFFLINE=1                 # weights are local; never hit the network
 export TMPDIR="${TMPDIR:-/tmp}"
 
-NGPU=$(python -c "import torch;print(torch.cuda.device_count())" 2>/dev/null || echo 1)
+# Shared node: pick GPUs that are actually free RIGHT NOW, capped so we never
+# take the whole box. Respects an explicit CUDA_VISIBLE_DEVICES if you set one.
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+  DEVS=$(bash "$ROOT/pick_gpus.sh") || {
+    echo "FATAL: no usable GPUs right now (see messages above). Try later, or"
+    echo "       MIN_FREE_GIB=10 bash 3_run.sh $CKPT"
+    exit 1
+  }
+  export CUDA_VISIBLE_DEVICES="$DEVS"
+else
+  echo "[gpu] using caller-supplied CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+fi
+NGPU=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .)
 # vLLM tensor-parallel must divide the model's 8 KV heads: 1,2,4,8 only.
 case "$NGPU" in 8) TP=8;; 4|5|6|7) TP=4;; 2|3) TP=2;; *) TP=1;; esac
 CONC=$(( TP * 16 ))

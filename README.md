@@ -21,11 +21,29 @@ bash 3_run.sh sft   &&  bash 4_check.sh sft
 bash 3_run.sh base  &&  bash 4_check.sh base
 ```
 
-Pick GPUs explicitly if the node is shared:
+## Shared-node GPU selection (automatic)
+
+`3_run.sh` picks GPUs at launch time, so it adapts to whatever else is running:
+
+- a GPU counts as usable only if it has **>= 12 GiB free** (`MIN_FREE_GIB`)
+- it takes **at most 4** (`MAX_GPUS`) so we never hog a shared box
+- the count is rounded down to a valid tensor-parallel size (1, 2, or 4 --
+  DR-Tulu has 8 KV heads, so 3 GPUs is not a legal configuration)
+- it prefers the emptiest GPUs, sitting beside other jobs rather than on them
+- if nothing is free it stops with a clear message instead of OOM-ing
+
+Override when you want to:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash 3_run.sh rl
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash 3_run.sh rl   # force specific GPUs
+MAX_GPUS=2 bash 3_run.sh rl                     # be even politer
+MIN_FREE_GIB=10 bash 3_run.sh rl                # accept tighter cards
+GPU_UTIL=0.70 bash 3_run.sh rl                  # if vLLM OOMs beside other jobs
 ```
+
+VRAM needed: weights are 15.3 GiB (bf16), sharded across GPUs -- 3.8 GiB/GPU at
+TP=4. Each 40,960-token sequence costs 5.6 GiB of KV cache, also sharded.
+On 22-27 GiB free per card, TP=4 gives roughly 12-15 concurrent sequences.
 
 ## Requirements
 
