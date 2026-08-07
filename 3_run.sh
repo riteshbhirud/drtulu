@@ -67,6 +67,13 @@ if [ -z "${CUDA_HOME:-}" ] && ! command -v nvcc >/dev/null 2>&1; then
 fi
 export HF_HUB_OFFLINE=1                 # weights are local; never hit the network
 export TMPDIR="${TMPDIR:-/tmp}"
+# On a SHARED node, GPU peer-to-peer and NCCL shared-memory transports often
+# fail between devices that belong to different jobs -- vLLM's TP workers then
+# die inside init_device(). Force the portable transports.
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # Shared node: pick GPUs that are actually free RIGHT NOW, capped so we never
 # take the whole box. Respects an explicit CUDA_VISIBLE_DEVICES if you set one.
@@ -143,6 +150,8 @@ python -u -m vllm.entrypoints.openai.api_server \
   --gpu-memory-utilization "${GPU_UTIL:-0.85}" \
   --tensor-parallel-size "$TP" \
   --max-num-seqs "$CONC" \
+  --distributed-executor-backend mp \
+  --disable-custom-all-reduce \
   --trust-remote-code --enable-prefix-caching \
   > "$ROOT/logs/${RUN_NAME}_vllm.log" 2>&1 &
 VLLM_PID=$!
@@ -157,11 +166,10 @@ for i in $(seq 1 150); do
     echo "FATAL: vllm died. ROOT CAUSE (first real error in the log):"
     # The outer traceback always ends in "Engine core initialization failed.
     # See root cause above." -- so surface what is actually above it.
-    grep -nE "Error|ERROR|Exception|RuntimeError|ValueError|No module|not found|CUDA|out of memory|OOM|nvcc|ninja|Failed" \
-      "$ROOT/logs/${RUN_NAME}_vllm.log" 2>/dev/null \
-      | grep -viE "^.*INFO|resource_tracker|See root cause" | head -15 | sed 's/^/    /'
-    echo "  --- last 15 lines ---"
-    tail -15 "$ROOT/logs/${RUN_NAME}_vllm.log" | sed 's/^/    /'
+    grep -E "^[^ ]*(Error|Exception):" "$ROOT/logs/${RUN_NAME}_vllm.log" 2>/dev/null | tail -8 | sed "s/^/    !! /"
+    grep -oE "No module named [^ ]+|CUDA out of memory|invalid device ordinal|no kernel image|NCCL error|free memory[^,]*" "$ROOT/logs/${RUN_NAME}_vllm.log" 2>/dev/null | sort -u | head -6 | sed "s/^/    >> /"
+    echo "  --- last 25 lines ---"
+    tail -25 "$ROOT/logs/${RUN_NAME}_vllm.log" | sed "s/^/    /"
     echo "  full log: $ROOT/logs/${RUN_NAME}_vllm.log"
     exit 1; }
   kill -0 "$SEARCH_PID" 2>/dev/null || { echo "FATAL: search died"; tail -40 "$ROOT/logs/${RUN_NAME}_search.log"; exit 1; }
