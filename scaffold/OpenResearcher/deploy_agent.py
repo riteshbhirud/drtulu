@@ -849,6 +849,26 @@ async def run_one(
         _out.tool_calls_successful = _clean_count + _repair_count
         _mal = _repair_count + _dropped_count
         _out.tool_call_malformation_rate = (_mal / _attempted_count) if _attempted_count else 0.0
+        # Retrieval-depth invariants (Hudson coordination): report BOTH, since
+        # systems differ on which axis they hold fixed. QUEST caps docs/query at
+        # the BCP protocol value of 5 but batches 2.3-2.6 queries per call;
+        # DR-Venus issues one query per call but requests topn ~7.5. Capping
+        # docs/turn would penalise batching, which is a trained behaviour of the
+        # agent rather than a harness setting.
+        _inv = _q = _d = 0
+        for _m in _out:
+            if _m.get("role") != "tool":
+                continue
+            _r = _m.get("retrieval") or []
+            if not _r:
+                continue
+            _inv += 1
+            _q += len(_r)
+            _d += sum(len(_e.get("docids") or []) for _e in _r)
+        _out.search_invocations = _inv
+        _out.queries_per_invocation = (_q / _inv) if _inv else 0.0
+        _out.docs_per_query = (_d / _q) if _q else 0.0
+        _out.docs_per_invocation = (_d / _inv) if _inv else 0.0
         return _out
 
     finally:
@@ -987,6 +1007,10 @@ def worker_entry(
                                         "tool_calls_dropped": getattr(messages, "tool_calls_dropped", 0),
                                         "tool_calls_successful": getattr(messages, "tool_calls_successful", 0),
                                         "tool_call_malformation_rate": getattr(messages, "tool_call_malformation_rate", 0.0),
+                                        "search_invocations": getattr(messages, "search_invocations", 0),
+                                        "queries_per_invocation": getattr(messages, "queries_per_invocation", 0.0),
+                                        "docs_per_query": getattr(messages, "docs_per_query", 0.0),
+                                        "docs_per_invocation": getattr(messages, "docs_per_invocation", 0.0),
                                         # Run-level provenance (Step 11 schema). Stamped at write
                                         # time so each trajectory is self-describing and cannot be
                                         # mis-attributed if result dirs are ever merged or moved.
