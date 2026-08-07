@@ -237,6 +237,12 @@ python -m pip install -q huggingface_hub
 # huggingface-cli was REMOVED in recent huggingface_hub; the command is now `hf`.
 # Try the modern entrypoint first and fall back through the older spellings.
 # Do NOT swallow stderr: a failed download used to look like success.
+# hf_xet is a Rust transfer backend that SEGFAULTS on some network
+# filesystems (seen on /netdisk). Disable it and the older hf_transfer so
+# downloads use plain HTTP, which is slower but does not crash.
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_ENABLE_HF_TRANSFER=0
+
 hf() {
   if command -v hf >/dev/null 2>&1; then
     hf "$@"
@@ -245,6 +251,36 @@ hf() {
   else
     huggingface-cli "$@"
   fi
+}
+
+# Pure-python download, used when the CLI crashes (segfault, etc).
+py_download() {  # py_download <repo> <local_dir> [allow_pattern]
+  python - "$1" "$2" "${3:-}" <<'PYEOF'
+import os, sys
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+from huggingface_hub import snapshot_download
+repo, local, pat = sys.argv[1], sys.argv[2], sys.argv[3]
+kw = dict(repo_id=repo, repo_type="dataset", local_dir=local,
+          max_workers=4, tqdm_class=None)
+if pat:
+    kw["allow_patterns"] = [pat]
+snapshot_download(**kw)
+print("   downloaded", repo)
+PYEOF
+}
+
+# Try the CLI; if it dies for ANY reason (including a segfault, which shows up
+# as exit 139), fall back to the python API.
+hf_get() {  # hf_get <repo> <local_dir> [allow_pattern]
+  local repo="$1" dir="$2" pat="${3:-}"
+  if [ -n "$pat" ]; then
+    hf download "$repo" --repo-type dataset --include "$pat" --local-dir "$dir" && return 0
+  else
+    hf download "$repo" --repo-type dataset --local-dir "$dir" && return 0
+  fi
+  echo "   CLI download failed (exit $?), retrying via python API..."
+  py_download "$repo" "$dir" "$pat"
 }
 
 # Skip only when the expected FILES exist -- an empty directory left behind by a
@@ -265,16 +301,15 @@ fi
 
 if need_dl "$ROOT/data/browsecomp-plus/data/*.parquet"; then
   echo "   downloading queries..."
-  hf download Tevatron/browsecomp-plus --repo-type dataset --local-dir "$ROOT/data/browsecomp-plus" || true
+  hf_get Tevatron/browsecomp-plus "$ROOT/data/browsecomp-plus" || true
 fi
 if need_dl "$ROOT/data/browsecomp-plus-corpus/data/*.parquet"; then
   echo "   downloading corpus (~1.7 GB)..."
-  hf download Tevatron/browsecomp-plus-corpus --repo-type dataset --local-dir "$ROOT/data/browsecomp-plus-corpus" || true
+  hf_get Tevatron/browsecomp-plus-corpus "$ROOT/data/browsecomp-plus-corpus" || true
 fi
 if need_dl "$ROOT/data/browsecomp-plus-indexes/bm25/*"; then
   echo "   downloading BM25 index (~2.1 GB)..."
-  hf download Tevatron/browsecomp-plus-indexes --repo-type dataset --include "bm25/*" \
-      --local-dir "$ROOT/data/browsecomp-plus-indexes" || true
+  hf_get Tevatron/browsecomp-plus-indexes "$ROOT/data/browsecomp-plus-indexes" "bm25/*" || true
 fi
 
 # Hard gate: the run cannot work without these, so fail here rather than at
@@ -305,7 +340,19 @@ dl() {
   local repo="$1" dir="$2"
   if [ -f "$ROOT/models/$dir/.complete" ]; then echo "     [skip] $dir"; return; fi
   echo "     downloading $repo (~16 GB; progress below)"
-  hf download "$repo" --local-dir "$ROOT/models/$dir" && touch "$ROOT/models/$dir/.complete"
+  if hf download "$repo" --local-dir "$ROOT/models/$dir"; then
+    touch "$ROOT/models/$dir/.complete"
+  else
+    echo "     CLI failed (exit $?), retrying via python API..."
+    python - "$repo" "$ROOT/models/$dir" <<'PYEOF' && touch "$ROOT/models/$dir/.complete"
+import os, sys
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2], max_workers=4)
+print("   downloaded", sys.argv[1])
+PYEOF
+  fi
 }
 dl rl-research/DR-Tulu-8B      DR-Tulu-8B
 dl rl-research/DR-Tulu-SFT-8B  DR-Tulu-SFT-8B
