@@ -77,6 +77,12 @@ cases = [
     ('<call_tool name="search" topn="10">my query</call_tool>', "search", "my query"),
     ('<call_tool name="open" cursor="0" id="3"></call_tool>',    "open",   None),
     ('<call_tool name="find" cursor="1">exact text</call_tool>', "find",   "exact text"),
+    # DR-Tulu emits its TRAINING tool names (google_search / browse_webpage /
+    # snippet_search) even though the mentor prompt teaches search/open/find.
+    # Observed live on ORNL: every call was google_search and all were dropped.
+    ('<call_tool name="google_search" topn="10">q</call_tool>',   "search", "q"),
+    ('<call_tool name="browse_webpage" id="3"></call_tool>',      "open",   None),
+    ('<call_tool name="snippet_search" topn="5">q</call_tool>',   "search", "q"),
 ]
 for raw, want, txt in cases:
     got = parse_call_tool_xml(raw)
