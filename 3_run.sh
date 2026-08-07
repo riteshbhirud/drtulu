@@ -67,13 +67,11 @@ if [ -z "${CUDA_HOME:-}" ] && ! command -v nvcc >/dev/null 2>&1; then
 fi
 export HF_HUB_OFFLINE=1                 # weights are local; never hit the network
 export TMPDIR="${TMPDIR:-/tmp}"
-# On a SHARED node, GPU peer-to-peer and NCCL shared-memory transports often
-# fail between devices that belong to different jobs -- vLLM's TP workers then
-# die inside init_device(). Force the portable transports.
-export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
-export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
-export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
+# NOTE: NCCL_P2P/SHM/IB_DISABLE were tried here on a wrong theory about
+# init_device() failing. The real cause was gpu-memory-utilization asking for
+# more than the shared node had free. Disabling those transports only slows
+# tensor-parallel down, so they are deliberately NOT set. Set them by hand if a
+# genuine NCCL error ever appears in the log.
 
 # Shared node: pick GPUs that are actually free RIGHT NOW, capped so we never
 # take the whole box. Respects an explicit CUDA_VISIBLE_DEVICES if you set one.
@@ -91,6 +89,31 @@ NGPU=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .)
 # vLLM tensor-parallel must divide the model's 8 KV heads: 1,2,4,8 only.
 case "$NGPU" in 8) TP=8;; 4|5|6|7) TP=4;; 2|3) TP=2;; *) TP=1;; esac
 CONC=$(( TP * 16 ))
+# --gpu-memory-utilization is a fraction of the card's TOTAL memory, not of
+# what is free. On a shared node the default 0.85 asks for more than exists and
+# vLLM dies with "Free memory ... is less than desired GPU memory utilization".
+# Derive it from the actual free memory on the tightest selected GPU.
+if [ -z "${GPU_UTIL:-}" ]; then
+  GPU_UTIL=$(python - <<'PYUTIL'
+import subprocess, os
+devs = [d.strip() for d in os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",") if d.strip()]
+out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.total,memory.used",
+                      "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
+frac = 0.85
+for line in out.strip().splitlines():
+    i, tot, used = [x.strip() for x in line.split(",")]
+    if i not in devs:
+        continue
+    free = (int(tot) - int(used)) / int(tot)
+    # leave ~8% headroom: other jobs on a shared node can grow, and vLLM needs
+    # room for activations beyond the KV cache it reserves.
+    frac = min(frac, max(0.30, free - 0.08))
+print(f"{frac:.2f}")
+PYUTIL
+)
+  echo "[cuda] gpu-memory-utilization=$GPU_UTIL (from free memory on the tightest selected GPU)"
+fi
+
 SEARCH_PORT=$(( 18000 + RANDOM % 900 ))
 VLLM_PORT=$(( 19000 + RANDOM % 900 ))
 
@@ -147,7 +170,7 @@ python -u -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" --served-model-name "$MODEL" \
   --host 127.0.0.1 --port "$VLLM_PORT" \
   --max-model-len "$RUN_CTX" \
-  --gpu-memory-utilization "${GPU_UTIL:-0.85}" \
+  --gpu-memory-utilization "$GPU_UTIL" \
   --tensor-parallel-size "$TP" \
   --max-num-seqs "$CONC" \
   --distributed-executor-backend mp \
