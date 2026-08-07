@@ -21,6 +21,11 @@ echo "=========================================================="
 echo "DR-Tulu bundle verification"
 echo "=========================================================="
 
+echo "[0] python >= 3.12 (gpt-oss has no build below this)"
+python -c 'import sys;sys.exit(0 if sys.version_info>=(3,12) else 1)' \
+  && ok "python $(python -c 'import sys;print("%d.%d"%sys.version_info[:2])')" \
+  || bad "python $(python -c 'import sys;print("%d.%d"%sys.version_info[:2])') -- need >=3.12; delete env/ and re-run 1_setup.sh"
+
 echo "[1] python imports"
 python - <<'PY' && ok "vllm/torch/pyserini/json5/tevatron import" || bad "core imports"
 import vllm, torch, json5, faiss, peft

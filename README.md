@@ -48,7 +48,11 @@ On 22-27 GiB free per card, TP=4 gives roughly 12-15 concurrent sequences.
 
 ## Requirements
 
-- Python >= 3.10. **No root needed.** If `python3 -m venv` fails because
+- **Python >= 3.12** — the scaffold's browser tool imports `gpt_oss`, and every
+  `gpt-oss` release on PyPI requires-python >= 3.12. If the system python is
+  older, `1_setup.sh` installs a local CPython 3.12 via `uv` (no root).
+  An `env/` built on an older python is detected and rebuilt automatically.
+- **No root needed.** If `python3 -m venv` fails because
   `ensurepip` is missing (common on Debian/Ubuntu clusters), `1_setup.sh`
   automatically falls back to: venv+get-pip, then `virtualenv`, then conda.
 - **Java 21** — pyserini/Lucene cannot open the index on Java 11. `1_setup.sh`

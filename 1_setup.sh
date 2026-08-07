@@ -4,7 +4,7 @@
 #
 #   bash 1_setup.sh
 #
-# Needs: python3.10+, java 21 (for pyserini/Lucene), ~120 GB disk, internet.
+# Needs: python >= 3.12 (auto-installed via uv if absent), java 21 (auto), ~120 GB disk, internet.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -16,10 +16,48 @@ echo "=========================================================="
 # ---------------------------------------------------------------- checks
 echo "[1/6] preflight"
 command -v python3 >/dev/null || { echo "FATAL: python3 not found"; exit 1; }
-PYV=$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-echo "   python $PYV"
-python3 -c 'import sys; sys.exit(0 if sys.version_info>=(3,10) else 1)' \
-  || { echo "FATAL: need python >= 3.10"; exit 1; }
+# We need >= 3.12: the scaffold's browser tool imports gpt_oss, and EVERY
+# gpt-oss release on PyPI requires-python >= 3.12. 3.10 cannot install it.
+PYBIN=""
+for c in python3.13 python3.12 python3; do
+  command -v "$c" >/dev/null || continue
+  if "$c" -c 'import sys; sys.exit(0 if sys.version_info>=(3,12) else 1)' 2>/dev/null; then
+    PYBIN="$(command -v "$c")"; break
+  fi
+done
+if [ -z "$PYBIN" ] && [ -x "$ROOT/py312/bin/python3" ]; then
+  PYBIN="$ROOT/py312/bin/python3"
+fi
+if [ -z "$PYBIN" ]; then
+  echo "   system python is $(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])'), need >= 3.12"
+  echo "   installing a local Python 3.12 (no root) via uv ..."
+  if ! command -v uv >/dev/null && [ ! -x "$HOME/.local/bin/uv" ]; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true
+  fi
+  UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
+  if [ -x "$UV" ]; then
+    "$UV" python install 3.12 2>&1 | tail -1
+    # `uv python find` can return a python already on PATH rather than the one
+    # it just installed, so look in uv's own install dir first.
+    PYBIN="$(ls -1 "$HOME"/.local/share/uv/python/cpython-3.1[2-9]*/bin/python3 2>/dev/null | head -1)"
+    [ -z "$PYBIN" ] && PYBIN="$("$UV" python find 3.12 2>/dev/null || true)"
+    # verify whatever we found is really >= 3.12
+    if [ -n "$PYBIN" ] && ! "$PYBIN" -c 'import sys;sys.exit(0 if sys.version_info>=(3,12) else 1)' 2>/dev/null; then
+      PYBIN=""
+    fi
+  fi
+  if [ -z "$PYBIN" ] || [ ! -x "$PYBIN" ]; then
+    echo "FATAL: could not obtain Python >= 3.12."
+    echo "   The scaffold needs gpt-oss, which has no build for python < 3.12."
+    echo "   Options:"
+    echo "     conda create -y -p $ROOT/env python=3.12 && bash 1_setup.sh"
+    echo "     module load python/3.12   (if your cluster has modules)"
+    exit 1
+  fi
+  echo "   using local python: $PYBIN"
+fi
+PYV=$("$PYBIN" -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo "   python $PYV  ($PYBIN)"
 
 # pyserini/Lucene REQUIRE Java 21; Java 11 cannot open the index. No root needed
 # -- we drop a JDK into the bundle and point JAVA_HOME at it.
@@ -77,16 +115,25 @@ export PIP_USER=0
 # Many clusters ship python3 without ensurepip (Debian splits it into
 # python3-venv), so `python3 -m venv` fails and you cannot apt-install without
 # root. Try four paths in order and use whichever works.
+# If an env already exists but was built on the wrong python (e.g. a 3.10 run
+# before we discovered gpt-oss needs >=3.12), rebuild it rather than silently
+# reusing a version that cannot install the dependencies.
+if [ -x "$ROOT/env/bin/python" ]; then
+  if ! "$ROOT/env/bin/python" -c 'import sys;sys.exit(0 if sys.version_info>=(3,12) else 1)' 2>/dev/null; then
+    echo "   existing env is python $("$ROOT/env/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])') -- rebuilding on $PYV"
+    rm -rf "$ROOT/env"
+  fi
+fi
 if [ ! -x "$ROOT/env/bin/python" ]; then
   MADE=0
   # (a) stock venv -- works when ensurepip is present
-  if [ $MADE -eq 0 ] && python3 -m venv "$ROOT/env" 2>/dev/null && [ -x "$ROOT/env/bin/python" ]; then
+  if [ $MADE -eq 0 ] && "$PYBIN" -m venv "$ROOT/env" 2>/dev/null && [ -x "$ROOT/env/bin/python" ]; then
     echo "   created with: python3 -m venv"; MADE=1
   fi
   # (b) venv without pip, then bootstrap pip via get-pip.py
   if [ $MADE -eq 0 ]; then
     rm -rf "$ROOT/env"
-    if python3 -m venv --without-pip "$ROOT/env" 2>/dev/null && [ -x "$ROOT/env/bin/python" ]; then
+    if "$PYBIN" -m venv --without-pip "$ROOT/env" 2>/dev/null && [ -x "$ROOT/env/bin/python" ]; then
       echo "   created with: python3 -m venv --without-pip"
       echo "   bootstrapping pip via get-pip.py ..."
       if curl -sSL https://bootstrap.pypa.io/get-pip.py -o "$ROOT/get-pip.py" 2>/dev/null \
@@ -108,15 +155,15 @@ if [ ! -x "$ROOT/env/bin/python" ]; then
   # (c) the virtualenv package (bundles its own pip, no ensurepip needed)
   if [ $MADE -eq 0 ]; then
     rm -rf "$ROOT/env"
-    python3 -m pip install --user -q virtualenv 2>/dev/null || true
-    if python3 -m virtualenv "$ROOT/env" 2>/dev/null && [ -x "$ROOT/env/bin/python" ]; then
+    "$PYBIN" -m pip install --user -q virtualenv 2>/dev/null || true
+    if "$PYBIN" -m virtualenv "$ROOT/env" 2>/dev/null && [ -x "$ROOT/env/bin/python" ]; then
       echo "   created with: virtualenv"; MADE=1
     fi
   fi
   # (d) conda / micromamba
   if [ $MADE -eq 0 ] && command -v conda >/dev/null; then
     rm -rf "$ROOT/env"
-    conda create -y -p "$ROOT/env" python=3.10 pip >/dev/null 2>&1 \
+    conda create -y -p "$ROOT/env" python=3.12 pip >/dev/null 2>&1 \
       && { echo "   created with: conda"; MADE=1; }
   fi
   if [ $MADE -eq 0 ]; then
