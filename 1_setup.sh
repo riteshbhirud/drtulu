@@ -184,7 +184,10 @@ python -m pip --version >/dev/null 2>&1 || {
   exit 1
 }
 echo "   using: $(python -V 2>&1), $(python -m pip --version | cut -d" " -f1-2)"
-python -m pip install -q --upgrade pip setuptools wheel
+# vllm 0.26 needs setuptools <81 and torch 2.11 needs <82; an unpinned
+# --upgrade pulls 83 and breaks both.
+python -m pip install -q --upgrade pip wheel
+python -m pip install -q "setuptools>=77.0.3,<81.0.0"
 
 # ---------------------------------------------------------------- deps
 echo "[3/6] python packages"
@@ -231,8 +234,18 @@ cd "$ROOT"
 echo "[5/6] BrowseComp-Plus data (queries, corpus, BM25 index)"
 mkdir -p "$ROOT/data"
 python -m pip install -q huggingface_hub
-# Do NOT swallow stderr here: a failed download used to look like success.
-hf() { python -m huggingface_hub.commands.huggingface_cli "$@" || huggingface-cli "$@"; }
+# huggingface-cli was REMOVED in recent huggingface_hub; the command is now `hf`.
+# Try the modern entrypoint first and fall back through the older spellings.
+# Do NOT swallow stderr: a failed download used to look like success.
+hf() {
+  if command -v hf >/dev/null 2>&1; then
+    hf "$@"
+  elif python -c "import huggingface_hub.commands" 2>/dev/null; then
+    python -m huggingface_hub.commands.huggingface_cli "$@"
+  else
+    huggingface-cli "$@"
+  fi
+}
 
 # Skip only when the expected FILES exist -- an empty directory left behind by a
 # failed download previously caused this step to be skipped forever, and the run
@@ -240,6 +253,15 @@ hf() { python -m huggingface_hub.commands.huggingface_cli "$@" || huggingface-cl
 need_dl() {  # need_dl <glob> ; true when the glob matches nothing
   ! compgen -G "$1" > /dev/null 2>&1
 }
+
+# Fail early and clearly if no huggingface CLI is usable at all.
+if ! command -v hf >/dev/null 2>&1 \
+   && ! python -c "import huggingface_hub.commands" 2>/dev/null \
+   && ! command -v huggingface-cli >/dev/null 2>&1; then
+  echo "FATAL: no usable huggingface CLI found."
+  echo "   pip install -U huggingface_hub   then re-run 1_setup.sh"
+  exit 1
+fi
 
 if need_dl "$ROOT/data/browsecomp-plus/data/*.parquet"; then
   echo "   downloading queries..."
