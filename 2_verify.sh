@@ -88,6 +88,26 @@ for raw, want, txt in cases:
 sys.exit(0)
 PY
 
+echo "[5b] rendered prompt must NOT contain a conflicting tool format"
+python - <<'PY2' && ok "rendered prompt teaches call_tool only" || bad "chat template injects <tool_call> -- model will ignore the mentor prompt"
+import os, sys, json
+sys.path.insert(0, "scaffold/OpenResearcher")
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("models/DR-Tulu-8B", trust_remote_code=True)
+prompt = open("prompts/drtulu_prompt.txt").read()
+msgs = [{"role": "system", "content": prompt}, {"role": "user", "content": "Q?"}]
+# 3_run.sh sets RUN_TOOL_FORMAT=call_tool_xml, which makes deploy_agent pass
+# tools=None. Reproduce that here.
+r = tok.apply_chat_template(msgs, tools=None, tokenize=False, add_generation_prompt=True)
+n_ct, n_tc = r.count("call_tool"), r.count("<tool_call>")
+print(f"       call_tool={n_ct}  <tool_call>={n_tc}")
+if n_ct < 5:
+    print("       mentor prompt not reaching the model"); sys.exit(1)
+if n_tc > 0:
+    print("       template injected a CONFLICTING <tool_call> format"); sys.exit(1)
+sys.exit(0)
+PY2
+
 echo "[6] malformed-tool-call salvage"
 python - <<'PY' && ok "salvage recovers malformed calls, rejects garbage" || bad "salvage"
 import sys

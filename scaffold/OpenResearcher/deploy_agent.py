@@ -476,9 +476,18 @@ async def run_one(
             print(f"{'='*60}")
 
             # Use tokenizer.apply_chat_template with tools parameter
+            # PATCHED (UMass ICLR runs): do NOT pass tools= when the system
+            # prompt already defines its own tool syntax. Qwen3's chat template
+            # appends "For each function call, return a json object ... within
+            # <tool_call></tool_call>", which directly CONTRADICTS DR-Tulu's
+            # mentor prompt (<call_tool name="search">...</call_tool>). The
+            # template's block comes last, so the model followed it -- or, faced
+            # with two formats, emitted neither and answered in prose after one
+            # round with zero tool calls.
+            _tools_arg = None if os.environ.get("RUN_TOOL_FORMAT") == "call_tool_xml" else tools
             prompt = generator.tokenizer.apply_chat_template(
                 messages,
-                tools=tools,
+                tools=_tools_arg,
                 tokenize=False,
                 add_generation_prompt=True
             )
