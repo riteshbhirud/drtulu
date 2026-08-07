@@ -140,9 +140,14 @@ echo "   using: $(python -V 2>&1), $(python -m pip --version | cut -d" " -f1-2)"
 python -m pip install -q --upgrade pip setuptools wheel
 
 # ---------------------------------------------------------------- deps
-echo "[3/6] python packages (vllm pulls its own torch; this takes a while)"
+echo "[3/6] python packages"
+echo "   NOTE: vllm pulls torch + several GB of CUDA libraries."
+echo "         Expect 10-30 min. Progress is shown below; if it looks stalled,"
+echo "         check from another shell:  du -sh $ROOT/env"
 if ! python -c "import vllm" 2>/dev/null; then
-  pip install -q vllm
+  # Deliberately NOT -q: a silent multi-GB download is indistinguishable from
+  # a hang, and that ambiguity has already cost us time.
+  pip install --progress-bar off vllm 2>&1 | grep -E "Collecting|Downloading|Installing|Successfully|ERROR" | tail -40
 fi
 # The scaffold imports these unconditionally, even on the pure-BM25 path.
 for pkg in pyserini json5 duckdb python-dotenv prettytable faiss-cpu peft \
@@ -195,7 +200,7 @@ mkdir -p "$ROOT/models"
 dl() {
   local repo="$1" dir="$2"
   if [ -f "$ROOT/models/$dir/.complete" ]; then echo "     [skip] $dir"; return; fi
-  echo "     downloading $repo"
+  echo "     downloading $repo (~16 GB; progress below)"
   hf download "$repo" --local-dir "$ROOT/models/$dir" && touch "$ROOT/models/$dir/.complete"
 }
 dl rl-research/DR-Tulu-8B      DR-Tulu-8B
