@@ -166,7 +166,11 @@ for i in $(seq 1 150); do
     echo "FATAL: vllm died. ROOT CAUSE (first real error in the log):"
     # The outer traceback always ends in "Engine core initialization failed.
     # See root cause above." -- so surface what is actually above it.
-    grep -E "^[^ ]*(Error|Exception):" "$ROOT/logs/${RUN_NAME}_vllm.log" 2>/dev/null | tail -8 | sed "s/^/    !! /"
+    # Worker errors are prefixed "(Worker pid=NNN) ERROR ... [file:line] " so a
+    # ^-anchored pattern never matches. Match the exception ANYWHERE in the line.
+    grep -oE "[A-Za-z_][A-Za-z_.]*(Error|Exception|Interrupt): ?[^\"]{0,160}" \
+      "$ROOT/logs/${RUN_NAME}_vllm.log" 2>/dev/null \
+      | grep -viE "^RuntimeError: Engine core initialization" | sort -u | tail -10 | sed "s/^/    !! /"
     grep -oE "No module named [^ ]+|CUDA out of memory|invalid device ordinal|no kernel image|NCCL error|free memory[^,]*" "$ROOT/logs/${RUN_NAME}_vllm.log" 2>/dev/null | sort -u | head -6 | sed "s/^/    >> /"
     echo "  --- last 25 lines ---"
     tail -25 "$ROOT/logs/${RUN_NAME}_vllm.log" | sed "s/^/    /"
