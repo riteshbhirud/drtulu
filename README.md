@@ -4,9 +4,10 @@ Runs DR-Tulu-8B (Base / SFT / RL) on all 830 BrowseComp-Plus questions with a
 BM25 retriever, producing the trajectories needed for Table 1.
 
 Everything is pre-configured and verified. **Run the four steps in order.**
+Pull fixes any time with `git pull` -- no re-setup needed.
 
 ```bash
-unzip drtulu_bundle.zip && cd drtulu_bundle
+git clone https://github.com/riteshbhirud/drtulu.git && cd drtulu
 
 bash 1_setup.sh                    # env + data + models (~1-2 h, ~120 GB)
 bash 2_verify.sh                   # MUST print ALL CHECKS PASSED
